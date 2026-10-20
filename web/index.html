@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ChatChat WebRTC 联调页（W4-M04-C2）</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: Consolas, Menlo, monospace; margin: 16px auto; max-width: 1080px;
+         background: #fafafa; color: #222; font-size: 13px; }
+  h1 { font-size: 18px; } h2 { font-size: 15px; margin-bottom: 6px; }
+  section { border: 1px solid #ccc; border-radius: 6px; padding: 10px 12px; margin: 10px 0; background: #fff; }
+  .hint { color: #666; }
+  input[type=text] { padding: 3px 5px; }
+  button { padding: 4px 12px; margin: 2px 4px 2px 0; cursor: pointer; }
+  video { width: 320px; height: 240px; background: #000; margin: 6px 8px 0 0; border: 1px solid #999; }
+  table { border-collapse: collapse; margin-top: 4px; }
+  th, td { border: 1px solid #bbb; padding: 2px 10px; text-align: left; min-width: 60px; }
+  th { background: #eee; }
+  .okcell.ok { color: #0a7d0a; font-weight: bold; }
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex;
+             align-items: center; justify-content: center; }
+  .overlay.hidden { display: none; }
+  .overlay-card { background: #fff; padding: 24px 32px; border-radius: 8px; text-align: center; }
+  .toast { position: fixed; right: 12px; bottom: 12px; background: #333; color: #fff;
+           padding: 8px 14px; border-radius: 6px; opacity: 0; transition: opacity .2s; max-width: 60%; }
+  .toast.show { opacity: 1; }
+  #eventLog { color: #555; white-space: pre-wrap; max-height: 120px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<h1>ChatChat WebRTC 1v1 信令联调页（W4-M04 Cycle C2）</h1>
+<p class="hint">单文件零依赖（禁 CDN/npm）：手写最小 proto 编解码 + 五型时序（invite→offer→answer→trickle ICE→hangup）+ 自检断言面板。
+凭据供给：<code>bin/wsprobe -scenario=webcall</code> 打印 <code>WEBCALL uid=&lt;n&gt; token=&lt;t&gt;</code> 两行，分别粘贴到两个标签页。
+操作序列：两端填 token/uid → connect → 主叫填 peerUid → 视频通话/音频通话（或勾选无媒体模式）→ 被叫接听 → 观察面板 → 挂断。</p>
+
+<section id="sec-proto">
+  <h2>0. Proto 自检（D4：加载即跑编码 round-trip 断言）</h2>
+  <table id="protoCheck"><thead><tr><th>断言</th><th>结果</th><th>ok</th></tr></thead><tbody></tbody></table>
+</section>
+
+<section id="sec-conn">
+  <h2>1. 连接（D2：<code>ws://host/ws?token=</code> query 鉴权；20s 心跳 cmd=1）</h2>
+  <label>token <input id="tokenInput" type="text" size="80" placeholder="粘贴 access token（WEBCALL 行）"></label><br>
+  <label>myUid <input id="uidInput" type="text" size="16" placeholder="本端 uid">（from 字段服务端覆写为鉴权 uid，此处仅作展示/记录）</label>
+  <button id="connectBtn">connect</button>
+  <span>WS 状态：<b id="wsState">未连接</b></span>
+</section>
+
+<section id="sec-call">
+  <h2>2. 呼叫（严格按 C2.2 剧本：主叫 getUserMedia→addTrack→invite(5)→createOffer→setLocal→offer(1)→逐条 ice(3)）</h2>
+  <label>peerUid <input id="peerUid" type="text" size="12" placeholder="对端 uid"></label>
+  <button id="videoCallBtn">视频通话</button>
+  <button id="audioCallBtn">音频通话</button>
+  <label title="D8 回退链：getUserMedia 不可用时以 dataChannel 证明信令+P2P 连通（媒体面 NOT RUN 登记）">
+    <input type="checkbox" id="noMediaMode"> 无媒体模式（dataChannel 回退，仅主叫侧勾选；被叫按 offer 内容自动识别）</label>
+  <button id="hangupBtn">挂断</button>
+  <span>呼叫状态：<b id="callState">idle</b></span>
+  <div>
+    <video id="localVideo" autoplay playsinline muted></video><!-- 本地 muted 防回声 -->
+    <video id="remoteVideo" autoplay playsinline></video><!-- 远程不 muted（go-chat-web 反例坑） -->
+  </div>
+</section>
+
+<section id="sec-panel">
+  <h2>3. 自检断言面板（D6：行 id = chk-&lt;name&gt;-value / chk-&lt;name&gt;-ok，供自动化读取）</h2>
+  <table id="selfcheck">
+    <thead><tr><th>name</th><th>value</th><th>ok</th></tr></thead>
+    <tbody>
+      <tr><td>wsOpen</td><td id="chk-wsOpen-value"></td><td id="chk-wsOpen-ok" class="okcell"></td></tr>
+      <tr><td>heartbeatAge</td><td id="chk-heartbeatAge-value"></td><td id="chk-heartbeatAge-ok" class="okcell"></td></tr>
+      <tr><td>invite</td><td id="chk-invite-value"></td><td id="chk-invite-ok" class="okcell"></td></tr>
+      <tr><td>offer</td><td id="chk-offer-value"></td><td id="chk-offer-ok" class="okcell"></td></tr>
+      <tr><td>answer</td><td id="chk-answer-value"></td><td id="chk-answer-ok" class="okcell"></td></tr>
+      <tr><td>ice</td><td id="chk-ice-value"></td><td id="chk-ice-ok" class="okcell"></td></tr>
+      <tr><td>hangup</td><td id="chk-hangup-value"></td><td id="chk-hangup-ok" class="okcell"></td></tr>
+      <tr><td>pcState</td><td id="chk-pcState-value"></td><td id="chk-pcState-ok" class="okcell"></td></tr>
+      <tr><td>dcOpen</td><td id="chk-dcOpen-value"></td><td id="chk-dcOpen-ok" class="okcell"></td></tr>
+      <tr><td>ontrackAudio</td><td id="chk-ontrackAudio-value"></td><td id="chk-ontrackAudio-ok" class="okcell"></td></tr>
+      <tr><td>ontrackVideo</td><td id="chk-ontrackVideo-value"></td><td id="chk-ontrackVideo-ok" class="okcell"></td></tr>
+      <tr><td>remoteFrameCount</td><td id="chk-remoteFrameCount-value"></td><td id="chk-remoteFrameCount-ok" class="okcell"></td></tr>
+      <tr><td>bytesReceived</td><td id="chk-bytesReceived-value"></td><td id="chk-bytesReceived-ok" class="okcell"></td></tr>
+      <tr><td>lastError</td><td id="chk-lastError-value"></td><td id="chk-lastError-ok" class="okcell"></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="sec-log">
+  <h2>4. 事件日志</h2>
+  <div id="eventLog"></div>
+</section>
+
+<div id="inviteOverlay" class="overlay hidden">
+  <div class="overlay-card">
+    <p id="inviteText">来电</p>
+    <button id="acceptBtn">接听</button>
+    <button id="rejectBtn">拒绝（hangup）</button>
+  </div>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+'use strict';
+/* ============================ 最小 protobuf 编解码（D4） ============================
+ * 线型：0=varint 1=64bit 2=length-delimited 5=32bit；未知字段按线型跳过。
+ * 三消息字段号冻结（pkg/protocol/protocol.proto）：
+ *   Frame{header=1(msg) payload=2(bytes)}  Header{cmd=1 seq=2 ack=3 traceId=4}
+ *   Signal{callId=1 from=2 to=3 signalType=4 sdp=5 candidate=6 isGroup=7}
+ * proto3 语义：零值字段不编码（省略），解码缺失字段取默认值。
+ * 值域：本页字段均为小值（seq/cmd/signalType < 2^31，串/字节 UTF-8），
+ * varint 以 Number 承载（<= 2^53 精确；跳过未知 64bit 字段时精度损失可容忍）。
+ */
+function PBWriter() { this.bytes = []; }
+PBWriter.prototype.varint = function (n) {
+  if (n < 0 || n > Number.MAX_SAFE_INTEGER) throw new Error('varint out of range: ' + n);
+  do {
+    var b = n % 128;
+    n = Math.floor(n / 128);
+    if (n > 0) b += 128;
+    this.bytes.push(b);
+  } while (n > 0);
+};
+PBWriter.prototype.tag = function (field, wire) { this.varint(field * 8 + wire); };
+PBWriter.prototype.intField = function (field, v) {
+  if (v !== 0) { this.tag(field, 0); this.varint(v); }
+};
+PBWriter.prototype.strField = function (field, s) {
+  var u8 = new TextEncoder().encode(s);
+  if (u8.length === 0) return;
+  this.tag(field, 2); this.varint(u8.length);
+  for (var i = 0; i < u8.length; i++) this.bytes.push(u8[i]);
+};
+PBWriter.prototype.bytesField = function (field, u8) {
+  if (!u8 || u8.length === 0) return;
+  this.tag(field, 2); this.varint(u8.length);
+  for (var i = 0; i < u8.length; i++) this.bytes.push(u8[i]);
+};
+PBWriter.prototype.append = function (arr) {
+  for (var i = 0; i < arr.length; i++) this.bytes.push(arr[i]);
+};
+
+function PBReader(u8) { this.u8 = u8; this.pos = 0; }
+PBReader.prototype.varint = function () {
+  var result = 0, shift = 1, b;
+  do {
+    if (this.pos >= this.u8.length) throw new Error('varint truncated');
+    b = this.u8[this.pos++];
+    result += (b & 0x7f) * shift;
+    shift *= 128;
+  } while (b & 0x80);
+  return result;
+};
+PBReader.prototype.tag = function () {
+  var v = this.varint();
+  return { field: Math.floor(v / 8), wire: v % 8 };
+};
+PBReader.prototype.bytes = function () {
+  var n = this.varint();
+  if (this.pos + n > this.u8.length) throw new Error('length-delimited truncated');
+  var out = this.u8.slice(this.pos, this.pos + n);
+  this.pos += n;
+  return out;
+};
+PBReader.prototype.str = function () { return new TextDecoder('utf-8').decode(this.bytes()); };
+PBReader.prototype.skip = function (wire) {
+  if (wire === 0) this.varint();
+  else if (wire === 1) this.pos += 8;
+  else if (wire === 2) this.pos += this.varint();
+  else if (wire === 5) this.pos += 4;
+  else throw new Error('unsupported wire type ' + wire);
+  if (this.pos > this.u8.length) throw new Error('skip past end');
+};
+PBReader.prototype.eof = function () { return this.pos >= this.u8.length; };
+
+function encodeHeaderInto(h, w) {
+  w.intField(1, h.cmd || 0);
+  w.intField(2, h.seq || 0);
+  w.intField(3, h.ack || 0);
+  w.strField(4, h.traceId || '');
+}
+function encodeSignalInto(sig, w) {
+  w.strField(1, sig.callId || '');
+  w.strField(2, sig.from || '');
+  w.strField(3, sig.to || '');
+  w.intField(4, sig.signalType || 0);
+  w.strField(5, sig.sdp || '');
+  w.strField(6, sig.candidate || '');
+  if (sig.isGroup) w.intField(7, 1);
+}
+function encodeSignal(sig) {
+  var w = new PBWriter();
+  encodeSignalInto(sig, w);
+  return new Uint8Array(w.bytes);
+}
+function encodeFrame(f) {
+  var w = new PBWriter();
+  if (f.header) {
+    var sub = new PBWriter();
+    encodeHeaderInto(f.header, sub);
+    w.tag(1, 2); w.varint(sub.bytes.length); w.append(sub.bytes);
+  }
+  if (f.payload && f.payload.length) w.bytesField(2, f.payload);
+  return new Uint8Array(w.bytes);
+}
+function decodeSignal(u8) {
+  var r = new PBReader(u8);
+  var s = { callId: '', from: '', to: '', signalType: 0, sdp: '', candidate: '', isGroup: false };
+  while (!r.eof()) {
+    var t = r.tag();
+    if (t.field === 1 && t.wire === 2) s.callId = r.str();
+    else if (t.field === 2 && t.wire === 2) s.from = r.str();
+    else if (t.field === 3 && t.wire === 2) s.to = r.str();
+    else if (t.field === 4 && t.wire === 0) s.signalType = r.varint();
+    else if (t.field === 5 && t.wire === 2) s.sdp = r.str();
+    else if (t.field === 6 && t.wire === 2) s.candidate = r.str();
+    else if (t.field === 7 && t.wire === 0) s.isGroup = r.varint() !== 0;
+    else r.skip(t.wire);
+  }
+  return s;
+}
+function decodeFrame(u8) {
+  var r = new PBReader(u8);
+  var f = { header: { cmd: 0, seq: 0, ack: 0, traceId: '' }, payload: new Uint8Array(0) };
+  while (!r.eof()) {
+    var t = r.tag();
+    if (t.field === 1 && t.wire === 2) {
+      var sub = new PBReader(r.bytes());
+      while (!sub.eof()) {
+        var st = sub.tag();
+        if (st.field === 1 && st.wire === 0) f.header.cmd = sub.varint();
+        else if (st.field === 2 && st.wire === 0) f.header.seq = sub.varint();
+        else if (st.field === 3 && st.wire === 0) f.header.ack = sub.varint();
+        else if (st.field === 4 && st.wire === 2) f.header.traceId = sub.str();
+        else sub.skip(st.wire);
+      }
+    } else if (t.field === 2 && t.wire === 2) {
+      f.payload = r.bytes();
+    } else r.skip(t.wire);
+  }
+  return f;
+}
+
+/* ---- proto 自检（D4：round-trip 断言打到自检面板）---- */
+function protoSelfCheck() {
+  var rows = [];
+  function row(name, ok, detail) { rows.push({ name: name, ok: !!ok, detail: detail || '' }); }
+  try {
+    var vals = [0, 1, 127, 128, 300, 16383, 16384, 2147483647], okAll = true;
+    for (var i = 0; i < vals.length; i++) {
+      var w = new PBWriter(); w.varint(vals[i]);
+      var r = new PBReader(new Uint8Array(w.bytes));
+      if (r.varint() !== vals[i]) okAll = false;
+    }
+    row('varint round-trip (0..2^31-1)', okAll);
+  } catch (e) { row('varint round-trip', false, e.message); }
+  try {
+    var sig = { callId: 'c-123', from: '101', to: '102', signalType: 3,
+                sdp: 'v=0\r\no=-', candidate: '{"candidate":"x"}', isGroup: true };
+    var got = decodeSignal(encodeSignal(sig));
+    row('Signal round-trip (7 字段)',
+      ['callId', 'from', 'to', 'signalType', 'sdp', 'candidate'].every(function (k) { return got[k] === sig[k]; }) && got.isGroup === true,
+      JSON.stringify(got));
+  } catch (e) { row('Signal round-trip', false, e.message); }
+  try { // 未知字段跳过：field1(callId) + field99 varint + field4(signalType)
+    var w2 = new PBWriter();
+    w2.strField(1, 'cx'); w2.tag(99, 0); w2.varint(7); w2.intField(4, 2);
+    var g2 = decodeSignal(new Uint8Array(w2.bytes));
+    row('unknown field skip (field 99)', g2.callId === 'cx' && g2.signalType === 2, JSON.stringify(g2));
+  } catch (e) { row('unknown field skip', false, e.message); }
+  try {
+    var payload = encodeSignal({ callId: 'cf', signalType: 5 });
+    var bytes = encodeFrame({ header: { cmd: 6, seq: 42, traceId: 'tr-1' }, payload: payload });
+    var g3 = decodeFrame(bytes);
+    row('Frame round-trip + 首 tag=0x0a',
+      bytes[0] === 0x0a && g3.header.cmd === 6 && g3.header.seq === 42 &&
+      g3.header.traceId === 'tr-1' && decodeSignal(g3.payload).callId === 'cf');
+  } catch (e) { row('Frame round-trip', false, e.message); }
+  var tbody = document.querySelector('#protoCheck tbody');
+  rows.forEach(function (r4) {
+    var tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + r4.name + '</td><td>' + (r4.ok ? 'pass' : 'FAIL: ' + r4.detail) +
+      '</td><td class="okcell' + (r4.ok ? ' ok' : '') + '">' + (r4.ok ? 'OK' : '—') + '</td>';
+    tbody.appendChild(tr);
+  });
+  return rows.every(function (r5) { return r5.ok; });
+}
+
+/* ============================ 全局状态 ============================ */
+var CMD = { HEARTBEAT: 1, HEARTBEAT_ACK: 2, SIGNAL: 6, ERROR: 10 };
+var SIG_T = { OFFER: 1, ANSWER: 2, ICE: 3, HANGUP: 4, INVITE: 5 };
+var TYPE_NAMES = { 1: 'offer', 2: 'answer', 3: 'ice', 4: 'hangup', 5: 'invite' };
+
+var ws = null, wsOpenFlag = false, lastPongAt = 0, hbTimer = null, upSeq = 0, toastTimer = null;
+var pc = null, localStream = null, dc = null, dcEcho = 0;
+var callId = null, peer = '', callState = 'idle', teardown = false;
+var pendingOffers = {};      // offer 早到缓存：callId → sdp（invite 后、接听前到达）
+var pendingIce = [];         // ICE 早到缓存（remoteDescription 设置前；C2.2 坑 7）
+var pendingInvite = null;    // {callId, from}
+var awaitingOffer = false;   // 已接听但 offer 未到（接听先于 offer 的窗口）
+var frameCbActive = false;
+var counts = { invite: { s: 0, r: 0 }, offer: { s: 0, r: 0 }, answer: { s: 0, r: 0 },
+               ice: { s: 0, r: 0 }, hangup: { s: 0, r: 0 } };
+var chk = { ontrackAudio: 0, ontrackVideo: 0, remoteFrameCount: 0,
+            bytesReceived: 0, bytesPrev: 0, bytesDelta: 0, pcState: 'none', lastError: '' };
+
+function $(id) { return document.getElementById(id); }
+function logLine(msg) {
+  var el = $('eventLog');
+  el.textContent += new Date().toISOString().slice(11, 23) + ' ' + msg + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+function toast(msg) {
+  var t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { t.className = 'toast'; }, 5000);
+  logLine('toast: ' + msg);
+}
+function setCallState(s) { callState = s; $('callState').textContent = s; }
+function setWsState(s) { $('wsState').textContent = s; }
+function myUid() { return $('uidInput').value.trim(); }
+
+/* ============================ 断言面板（D6） ============================ */
+function setRow(name, value, ok) {
+  var v = $('chk-' + name + '-value'), o = $('chk-' + name + '-ok');
+  if (v) v.textContent = value;
+  if (o) { o.textContent = ok ? 'OK' : '—'; o.className = 'okcell' + (ok ? ' ok' : ''); }
+}
+function updatePanel() {
+  setRow('wsOpen', wsOpenFlag ? 'true' : 'false', wsOpenFlag);
+  var age = lastPongAt ? Math.floor((Date.now() - lastPongAt) / 1000) : -1;
+  setRow('heartbeatAge', age + 's', wsOpenFlag && age >= 0 && age < 40);
+  ['invite', 'offer', 'answer', 'ice', 'hangup'].forEach(function (t) {
+    setRow(t, 's=' + counts[t].s + ' r=' + counts[t].r, true);
+  });
+  setRow('pcState', chk.pcState, chk.pcState === 'connected');
+  setRow('dcOpen', dc && dc.readyState === 'open' ? 'true (echo=' + dcEcho + ')' : 'false', !!dc && dc.readyState === 'open');
+  setRow('ontrackAudio', String(chk.ontrackAudio), chk.ontrackAudio > 0);
+  setRow('ontrackVideo', String(chk.ontrackVideo), chk.ontrackVideo > 0);
+  setRow('remoteFrameCount', String(chk.remoteFrameCount), chk.remoteFrameCount > 0);
+  setRow('bytesReceived', String(chk.bytesReceived) + (chk.bytesDelta > 0 ? ' (+' + chk.bytesDelta + ')' : ''),
+         chk.bytesReceived > 0);
+  setRow('lastError', chk.lastError || 'none', !chk.lastError);
+}
+
+/* ============================ WS 连接 + 心跳 ============================ */
+function connect() {
+  if (ws && (ws.readyState === 0 || ws.readyState === 1)) { toast('已在连接/已连接'); return; }
+  var token = $('tokenInput').value.trim();
+  if (!token) { toast('请先粘贴 token（wsprobe -scenario=webcall 输出）'); return; }
+  var proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  setWsState('connecting');
+  ws = new WebSocket(proto + '://' + location.host + '/ws?token=' + encodeURIComponent(token));
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = function () {
+    wsOpenFlag = true; lastPongAt = Date.now();
+    setWsState('open'); logLine('ws open'); updatePanel();
+    stopHeartbeat();
+    hbTimer = setInterval(function () { // 20s 心跳（< 服务端 60s 读空闲）
+      if (wsOpenFlag) sendFrame({ header: { cmd: CMD.HEARTBEAT } });
+    }, 20000);
+  };
+  ws.onclose = function (ev) {
+    wsOpenFlag = false; stopHeartbeat();
+    setWsState('closed (code ' + ev.code + ')');
+    logLine('ws closed code=' + ev.code);
+    if (pc) { teardownCall(); setCallState('idle'); }
+    updatePanel();
+  };
+  ws.onerror = function () { setWsState('error'); };
+  ws.onmessage = onWsMessage;
+}
+function stopHeartbeat() { if (hbTimer) { clearInterval(hbTimer); hbTimer = null; } }
+function sendFrame(f) {
+  if (!ws || ws.readyState !== 1) { toast('WS 未连接'); return; }
+  ws.send(encodeFrame(f));
+}
+function sendSignal(signalType, extra) {
+  var sig = { callId: callId || '', from: myUid(), to: peer, signalType: signalType };
+  if (extra) for (var k in extra) sig[k] = extra[k];
+  upSeq++;
+  sendFrame({ header: { cmd: CMD.SIGNAL, seq: upSeq,
+    traceId: 'web-' + Math.random().toString(36).slice(2, 10) }, payload: encodeSignal(sig) });
+  counts[TYPE_NAMES[signalType]].s++;
+  logLine('send ' + TYPE_NAMES[signalType] + ' callId=' + sig.callId + ' to=' + sig.to);
+  updatePanel();
+}
+
+function onWsMessage(ev) {
+  var f;
+  try { f = decodeFrame(new Uint8Array(ev.data)); }
+  catch (e) { logLine('decode frame failed: ' + e.message); return; }
+  switch (f.header.cmd) {
+    case CMD.HEARTBEAT_ACK: lastPongAt = Date.now(); updatePanel(); break;
+    case CMD.SIGNAL: {
+      var sig;
+      try { sig = decodeSignal(f.payload); }
+      catch (e) { logLine('decode Signal failed: ' + e.message); return; }
+      var name = TYPE_NAMES[sig.signalType];
+      if (name) counts[name].r++;
+      logLine('recv ' + (name || 'type' + sig.signalType) + ' callId=' + sig.callId + ' from=' + sig.from +
+              ' traceId=' + f.header.traceId);
+      handleSignal(sig);
+      updatePanel();
+      break;
+    }
+    case CMD.ERROR: { // payload = {code,message} JSON（server.SendError 口径）
+      var body = {};
+      try { body = JSON.parse(new TextDecoder('utf-8').decode(f.payload)); } catch (e) { /* 保留空 */ }
+      logLine('recv CmdError code=' + body.code + ' msg=' + body.message + ' traceId=' + f.header.traceId);
+      handleCmdError(body);
+      break;
+    }
+    default: break;
+  }
+}
+
+function handleCmdError(body) {
+  chk.lastError = (body.code || '?') + ' ' + (body.message || '');
+  updatePanel();
+  if (body.code === 7101) { // 对端不在线（显式回执——补齐 go-chat 静默缺陷）
+    toast('对端不在线（7101）');
+    teardown = true;
+    teardownCall();
+    setCallState('idle');
+    return;
+  }
+  if (body.code === 7102) { // 信令会话无效：收尾期静默容忍；非收尾期提示
+    if (!teardown) toast('信令会话无效（7102：不存在/已结束/非参与者）');
+    return;
+  }
+  toast('服务端错误 ' + (body.code || '') + ': ' + (body.message || ''));
+}
+
+/* ============================ WebRTC 呼叫（C2.2 剧本） ============================ */
+function createPeer() {
+  // 无 STUN/TURN（ADR-0011 缺口登记）：ICE candidate 服务端仅透传，
+  // 本机双标签联调走 host 候选可达；跨网段需另行配置。
+  var p = new RTCPeerConnection({ iceServers: [] });
+  p.onicecandidate = function (e) { // trickle：逐条发送（JSON.stringify 即 RTCIceCandidateInit）
+    if (e.candidate) sendSignal(SIG_T.ICE, { candidate: JSON.stringify(e.candidate) });
+  };
+  p.ontrack = function (e) {
+    if (e.track.kind === 'audio') chk.ontrackAudio++;
+    if (e.track.kind === 'video') chk.ontrackVideo++;
+    $('remoteVideo').srcObject = e.streams[0]; // 远程不 muted
+    startFrameCounter();
+    logLine('ontrack kind=' + e.track.kind);
+    updatePanel();
+  };
+  p.onconnectionstatechange = function () {
+    chk.pcState = p.connectionState;
+    logLine('pc ' + p.connectionState);
+    updatePanel();
+  };
+  p.ondatachannel = function (e) { attachDataChannel(e.channel); }; // 被叫侧 D8 回退
+  return p;
+}
+function attachDataChannel(channel) {
+  dc = channel;
+  dcEcho = 0;
+  dc.onopen = function () {
+    logLine('dataChannel open');
+    try { dc.send('ping'); } catch (e) { /* 忽略 */ }
+    updatePanel();
+  };
+  dc.onmessage = function (e) {
+    dcEcho++;
+    if (e.data === 'ping') { try { dc.send('pong'); } catch (err) { /* 忽略 */ } }
+    updatePanel();
+  };
+  dc.onclose = function () { updatePanel(); };
+}
+function startFrameCounter() { // requestVideoFrameCallback 计远程真实渲染帧
+  var rv = $('remoteVideo');
+  if (frameCbActive || !rv.requestVideoFrameCallback) return;
+  frameCbActive = true;
+  var cb = function () {
+    chk.remoteFrameCount++;
+    updatePanel();
+    rv.requestVideoFrameCallback(cb);
+  };
+  rv.requestVideoFrameCallback(cb);
+}
+
+/* 主叫：getUserMedia（或 dataChannel 回退）→ addTrack → invite(5) → createOffer
+ * → setLocal → offer(1) → onicecandidate 逐条 ice(3)。 */
+function startCall(withVideo) {
+  if (!wsOpenFlag) { toast('请先 connect'); return; }
+  peer = $('peerUid').value.trim();
+  if (!peer) { toast('请输入对端 uid'); return; }
+  teardownCall(); // 二次呼叫重建 pc（C2.2：不复用旧 pc）
+  teardown = false;
+  resetCallEvidence();
+  callId = (window.crypto && crypto.randomUUID)
+    ? crypto.randomUUID() : 'c-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+  var noMedia = $('noMediaMode').checked;
+  pc = createPeer();
+  if (noMedia) {
+    attachDataChannel(pc.createDataChannel('fallback'));
+    setCallState('calling (dataChannel)');
+    doInviteAndOffer();
+    return;
+  }
+  navigator.mediaDevices.getUserMedia({ audio: true, video: withVideo })
+    .then(function (stream) {
+      localStream = stream;
+      localStream.getTracks().forEach(function (t) { pc.addTrack(t, localStream); });
+      var lv = $('localVideo');
+      lv.srcObject = localStream; lv.muted = true; // 本地静音防回声
+      setCallState(withVideo ? 'calling (video)' : 'calling (audio)');
+      doInviteAndOffer();
+    })
+    .catch(function (e) { // D8 回退链：getUserMedia 不可用 → dataChannel 模式
+      toast('getUserMedia 不可用（' + e.name + '），回退无媒体模式——媒体面 NOT RUN 登记');
+      logLine('getUserMedia failed: ' + e.name + ' ' + e.message);
+      attachDataChannel(pc.createDataChannel('fallback'));
+      setCallState('calling (dataChannel-fallback)');
+      doInviteAndOffer();
+    });
+}
+function doInviteAndOffer() {
+  sendSignal(SIG_T.INVITE, {}); // invite(5)：媒体就绪后发（C2.2 剧本）
+  pc.createOffer()
+    .then(function (offer) { return pc.setLocalDescription(offer); })
+    .then(function () {
+      sendSignal(SIG_T.OFFER, { sdp: pc.localDescription.sdp }); // offer(1)
+    })
+    .catch(function (e) { failCall('createOffer/setLocal 失败: ' + e.message); });
+}
+
+/* 被叫：invite 弹层 → 接听（user gesture）→ getUserMedia → addTrack →
+ * setRemote(缓存 offer) → createAnswer → setLocal → answer(2) → ICE。 */
+function onInvite(sig) {
+  pendingInvite = { callId: sig.callId, from: sig.from };
+  $('inviteText').textContent = '来电：uid ' + sig.from + '（callId ' + sig.callId + '）';
+  $('inviteOverlay').className = 'overlay';
+  setCallState('incoming');
+}
+function acceptCall() {
+  if (!pendingInvite) return;
+  var inv = pendingInvite;
+  pendingInvite = null;
+  $('inviteOverlay').className = 'overlay hidden';
+  callId = inv.callId;
+  peer = inv.from; // from 已被服务端覆写为鉴权 uid（权威值）
+  teardown = false;
+  // 先取出早到缓存的 offer 再 teardown——teardownCall 会清 pendingOffers；
+  // 主叫「invite 后立即 offer」时 offer 先于接听到达（联调发现：原顺序
+  // 恒取 null，接听侧死等 offer）。
+  var offerSdp = pendingOffers[callId] || null;
+  teardownCall();
+  resetCallEvidence();
+  pc = createPeer();
+  var isMedia = !!offerSdp && /m=(audio|video)/.test(offerSdp);
+  var prep = Promise.resolve();
+  if (isMedia) {
+    prep = navigator.mediaDevices.getUserMedia({ audio: true, video: true })
+      .then(function (stream) {
+        localStream = stream;
+        localStream.getTracks().forEach(function (t) { pc.addTrack(t, localStream); });
+        var lv = $('localVideo');
+        lv.srcObject = localStream; lv.muted = true;
+      })
+      .catch(function (e) { // 接听侧无媒体：以收流模式应答（远程帧断言仍可用）
+        toast('接听侧 getUserMedia 不可用（' + e.name + '）：以收流模式应答');
+        logLine('callee getUserMedia failed: ' + e.name);
+      });
+  }
+  setCallState(offerSdp ? 'accepted (answering)' : 'accepted (waiting offer)');
+  prep.then(function () {
+    if (offerSdp) { awaitingOffer = false; applyOfferAndAnswer(offerSdp); }
+    else awaitingOffer = true; // offer 尚未到达：onRemoteOffer 到达时自动应答
+  });
+}
+function applyOfferAndAnswer(sdp) {
+  pc.setRemoteDescription({ type: 'offer', sdp: sdp })
+    .then(flushPendingIce)
+    .then(function () { return pc.createAnswer(); })
+    .then(function (answer) { return pc.setLocalDescription(answer); })
+    .then(function () {
+      sendSignal(SIG_T.ANSWER, { sdp: pc.localDescription.sdp }); // answer(2)
+      setCallState('active');
+    })
+    .catch(function (e) { failCall('answer 失败: ' + e.message); });
+}
+function rejectCall() { // 拒绝 = hangup(4)（C2 指令：拒绝即挂断语义）
+  if (!pendingInvite) return;
+  var inv = pendingInvite;
+  pendingInvite = null;
+  $('inviteOverlay').className = 'overlay hidden';
+  callId = inv.callId;
+  peer = inv.from;
+  teardown = false;
+  sendSignal(SIG_T.HANGUP, {});
+  teardown = true;
+  teardownCall();
+  setCallState('idle (rejected)');
+  logLine('call rejected (hangup sent)');
+}
+
+function onRemoteOffer(sig) {
+  pendingOffers[sig.callId] = sig.sdp; // 早到缓存（接听前到达）
+  if (awaitingOffer && sig.callId === callId && pc) {
+    awaitingOffer = false;
+    applyOfferAndAnswer(sig.sdp);
+  }
+}
+function onRemoteAnswer(sig) {
+  if (!pc || sig.callId !== callId) return;
+  pc.setRemoteDescription({ type: 'answer', sdp: sig.sdp })
+    .then(flushPendingIce)
+    .then(function () { setCallState('active'); })
+    .catch(function (e) { failCall('setRemote(answer) 失败: ' + e.message); });
+}
+function onRemoteIce(sig) {
+  if (!pc || sig.callId !== callId) return; // 未知会话 ICE 忽略
+  if (!pc.remoteDescription) { pendingIce.push(sig.candidate); return; } // 早到缓存（坑 7）
+  pc.addIceCandidate(JSON.parse(sig.candidate)).catch(function () { /* 迟到/失效候选容忍 */ });
+}
+function flushPendingIce() {
+  var list = pendingIce;
+  pendingIce = [];
+  return Promise.all(list.map(function (c) {
+    return pc.addIceCandidate(JSON.parse(c)).catch(function () { /* 容忍 */ });
+  }));
+}
+function onRemoteHangup(sig) {
+  if (!callId || sig.callId !== callId) return; // callId 匹配（审查 P2：宽容转发面下防未知会话挂断拆任意通话 UI）
+  teardown = true; // 收尾期：后续 7102 静默
+  teardownCall();
+  setCallState('ended (remote hangup)');
+  toast('对端已挂断');
+}
+
+function handleSignal(sig) {
+  switch (sig.signalType) {
+    case SIG_T.INVITE: onInvite(sig); break;
+    case SIG_T.OFFER: onRemoteOffer(sig); break;
+    case SIG_T.ANSWER: onRemoteAnswer(sig); break;
+    case SIG_T.ICE: onRemoteIce(sig); break;
+    case SIG_T.HANGUP: onRemoteHangup(sig); break;
+    default: logLine('unknown signalType ' + sig.signalType);
+  }
+}
+
+function hangup() { // 挂断：hangup(4) → stop tracks → pc.close()（顺序：先发帧再拆本地）
+  if (!callId) return;
+  teardown = true;
+  if (wsOpenFlag) sendSignal(SIG_T.HANGUP, {});
+  teardownCall();
+  setCallState('idle');
+  logLine('hangup sent, call torn down');
+}
+function teardownCall() {
+  if (localStream) {
+    localStream.getTracks().forEach(function (t) { t.stop(); });
+    localStream = null;
+    $('localVideo').srcObject = null;
+  }
+  if (pc) { try { pc.close(); } catch (e) { /* 忽略 */ } pc = null; }
+  dc = null;
+  pendingIce = [];
+  pendingOffers = {};
+  awaitingOffer = false;
+  chk.pcState = 'none';
+  updatePanel();
+}
+function resetCallEvidence() { // 新呼叫开始时清 per-call 证据（跨呼叫不复用）
+  chk.ontrackAudio = 0; chk.ontrackVideo = 0;
+  chk.remoteFrameCount = 0;
+  chk.bytesReceived = 0; chk.bytesPrev = 0; chk.bytesDelta = 0;
+  chk.lastError = '';
+  frameCbActive = false;
+  $('remoteVideo').srcObject = null;
+  updatePanel();
+}
+function failCall(msg) {
+  toast(msg);
+  teardown = true;
+  teardownCall();
+  setCallState('idle');
+}
+
+/* bytesReceived 采样（getStats 差分：inbound-rtp + data-channel 字节和） */
+setInterval(function () {
+  if (!pc || pc.connectionState !== 'connected') return;
+  pc.getStats().then(function (report) {
+    var total = 0;
+    report.forEach(function (s) {
+      if ((s.type === 'inbound-rtp' || s.type === 'data-channel') && s.bytesReceived) total += s.bytesReceived;
+    });
+    chk.bytesDelta = total - chk.bytesPrev;
+    if (total > chk.bytesPrev) chk.bytesPrev = total;
+    chk.bytesReceived = total;
+    updatePanel();
+  }).catch(function () { /* 采样失败忽略 */ });
+}, 2000);
+
+setInterval(updatePanel, 1000); // heartbeatAge 每秒刷新
+
+/* ============================ 绑定 ============================ */
+$('connectBtn').onclick = connect;
+$('videoCallBtn').onclick = function () { startCall(true); };
+$('audioCallBtn').onclick = function () { startCall(false); };
+$('hangupBtn').onclick = hangup;
+$('acceptBtn').onclick = acceptCall;
+$('rejectBtn').onclick = rejectCall;
+
+protoSelfCheck();
+updatePanel();
+logLine('page loaded（W4-M04-C2 联调页；proto 自检见上方表格）');
+</script>
+</body>
+</html>

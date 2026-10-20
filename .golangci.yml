@@ -1,0 +1,51 @@
+# ChatChat lint 配置（W1-M07 落档，golangci-lint v2 schema；W2-M07 卫生收口）。
+# 规则集：W1-M00 冻结的四规则显式 enable（default: none，不依赖默认集隐式
+# 行为，自文档化）；formatter 固定 gofmt（与 make fmt-check 同一口径）。
+# 降级顺序：lint 工具缺失/不可用时 NOT RUN 合规登记，替代证据 = go vet +
+# gofmt（先例 W1-M01~M03）；revive 存量告警 >20 条时按 W1-M07-plan §6.2
+# 授权整体砍除并在验收报告登记（当前 12 条 ≤ 20，未触发）。
+# 约束：disable 任何规则必须附理由注释（gotify 反面教训：无理由 disable /
+# errcheck 被 disable）；禁止无理由 //nolint 绕过。
+# W2-M07：W1 移交的 package-comments 暂闭与 service.go/jwt.go 两条排除已随
+# 卫生清理（doc.go 空行/ctx 参数名/导出方法注释）全部恢复/删除（仅保留
+# .pb.go 生成物路径排除）。
+# W3-M04：W2 移交项 1 之 M04 份额关闭——revive 存量排除随本 Cycle 触达
+# 修复并删除四条（internal/dao/message_repo.go 局部 max→maxSeq、
+# memory_deliverer_test.go 参数名 max→retryMax、pull.go 包注释规范化
+# （doc.go 已有包注释，pull.go 头注释与 package 子句间空行阻断关联）、
+# pull.go MessageItem→DTO 更名），仅余 protocol_test 一条（pkg/protocol
+# 禁改，归后续触达）。
+
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - revive
+  exclusions:
+    # [理由] protoc 生成物（W2-M01）：lint 规则不适用于机器生成代码；人工
+    # 审查走 protocol.proto 与 make proto 再生成 diff（禁手改 .pb.go，
+    # W2-M01-plan §2），不依赖 lint 对生成物把关。
+    paths:
+      - .*\.pb\.go$
+    rules:
+      # [理由] W2-M07 恢复 package-comments 时的实测发现：W1-M07 落档的
+      # settings.revive.rules 非空（唯一条目即被禁用的 package-comments）
+      # 会使 golangci-lint 以“仅列出规则”替换 revive 默认规则集——即 M02~
+      # M06 期间 revive 实际零规则运行，0 issues 系配置语义事故而非代码
+      # 干净（旧配置复跑实证：同为 0 issues；去 settings 后暴露存量）。
+      # 存量排除的生命周期：随代码修复并删除条目（W3-M01 关闭 router_test
+      # 一条；W3-M04 关闭四条——见文件头）；本条所在 pkg/protocol 为各模块
+      # plan §9 禁改文件（protocol_test.go:158 error-return，error 非末位），
+      # 移交后续触达该包时随代码修复并删除。
+      - path: ^pkg/protocol/protocol_test\.go$
+        text: "error-return:"
+        linters:
+          - revive
+
+formatters:
+  enable:
+    - gofmt

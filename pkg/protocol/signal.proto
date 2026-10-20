@@ -1,0 +1,25 @@
+// pkg/protocol/signal.proto
+syntax = "proto3";
+// 嵌套 proto 包裁决（W4-M04 实现登记）：proto 同包内 service 与 message
+// 不得同名——service Signal 与 protocol.proto 冻结 message Signal（W2-M01）
+// 在 package protocol 下冲突（protoc: "protocol.Signal is already defined"）。
+// 独立子包 protocol.signal 消解冲突且保留 plan D9 冻结的 service Signal /
+// rpc Exchange 字面；go_package 仍指向 chatchat/pkg/protocol，生成 Go 代码
+// 与既有消息同包（deliver.proto 先例 + M 标志统一映射）。
+package protocol.signal;
+option go_package = "chatchat/pkg/protocol";  // 与 deliver.proto 同包同目录（paths=source_relative）
+
+import "pkg/protocol/protocol.proto";
+
+// SignalFrame 信令 gRPC 契约面载体（W4-M04，ADR-0011）：内嵌冻结
+// protocol.Signal（七字段零重复定义，W2-M01 冻结面只 import 不改写）。
+message SignalFrame {
+  protocol.Signal signal = 1;
+}
+
+// Signal 服务：Exchange 双向流（spec §8.4 字面——「信令改走 gRPC stream」）。
+// 每流以 metadata "uid"（十进制串）标识身份（loopback 信任边界内注入），
+// 上行帧经 gateway 进程内同一 Service 核心校验/路由，下行帧经流回投对端。
+service Signal {
+  rpc Exchange(stream SignalFrame) returns (stream SignalFrame);
+}

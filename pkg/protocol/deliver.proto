@@ -1,0 +1,18 @@
+// pkg/protocol/deliver.proto
+syntax = "proto3";
+package protocol;
+option go_package = "chatchat/pkg/protocol";  // 与 protocol.proto 同包同目录（paths=source_relative）
+
+import "pkg/protocol/protocol.proto";
+
+// DeliveryEnvelope Logic→pushpull 投递信封（W3-M03，ADR-0007）：消息体复用冻结
+// ChatMessage（WS 下行同构），members 为写扩散目标，traceId 显式透传不依赖进程 ctx。
+// W4-M03 D2 增 kind（信封类型判别，gateway 构帧分流依据）：值冻结——
+// 0=content（缺省，既有写扩散/推送语义，旧信封零影响）；1=notify（轻通知——
+// 热点群 Timeline 写成功后的可丢通知信封，members=在线成员列表）。
+message DeliveryEnvelope {
+  ChatMessage message = 1;
+  repeated uint64 members = 2;
+  string traceId = 3;
+  int32 kind = 4;
+}

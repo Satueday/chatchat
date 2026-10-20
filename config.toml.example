@@ -1,0 +1,94 @@
+# ChatChat 配置模板（W1-M02）。
+# 用法：cp config.toml.example config.toml 后按需修改；敏感项一律走环境变量。
+# 环境变量覆盖：CHATCHAT_ 前缀 + 段.键大写（. → _），如 CHATCHAT_SERVER_ADDR；
+# 每个键的 env 名见各行注释，优先级 env > 文件 > 内置默认值。详见 README.md。
+
+[server]
+addr = ":8080"            # env: CHATCHAT_SERVER_ADDR
+mode = "release"          # debug|release|test，env: CHATCHAT_SERVER_MODE
+
+[log]
+level = "info"            # debug|info|warn|error，env: CHATCHAT_LOG_LEVEL
+encoder = "json"          # json|console（dev 用 console），env: CHATCHAT_LOG_ENCODER
+output = "stdout"         # stdout|file（file 时写 logs/chatchat.log，轮转留扩展），env: CHATCHAT_LOG_OUTPUT
+
+[mysql]
+host = "127.0.0.1"        # env: CHATCHAT_MYSQL_HOST
+port = 3306               # env: CHATCHAT_MYSQL_PORT
+user = "root"             # env: CHATCHAT_MYSQL_USER
+password = ""             # 敏感项，env: CHATCHAT_MYSQL_PASSWORD
+database = "chatchat"     # env: CHATCHAT_MYSQL_DATABASE
+charset = "utf8mb4"       # env: CHATCHAT_MYSQL_CHARSET
+parse_time = true         # env: CHATCHAT_MYSQL_PARSE_TIME
+loc = "UTC"               # 时间统一 UTC，env: CHATCHAT_MYSQL_LOC
+max_open_conns = 20       # env: CHATCHAT_MYSQL_MAX_OPEN_CONNS
+max_idle_conns = 10       # env: CHATCHAT_MYSQL_MAX_IDLE_CONNS
+conn_max_lifetime_sec = 3600  # env: CHATCHAT_MYSQL_CONN_MAX_LIFETIME_SEC
+
+[redis]
+addr = "127.0.0.1:6379"   # env: CHATCHAT_REDIS_ADDR
+password = ""             # 敏感项，env: CHATCHAT_REDIS_PASSWORD
+db = 0                    # env: CHATCHAT_REDIS_DB
+pool_size = 50            # env: CHATCHAT_REDIS_POOL_SIZE
+
+[kafka]
+brokers = ["127.0.0.1:9092"]  # env: CHATCHAT_KAFKA_BROKERS（逗号分隔）
+topic = "chatchat-message"    # 普通投递 topic（分区键 conversationId 同会话保序），env: CHATCHAT_KAFKA_TOPIC
+consumer_group = "chatchat-pushpull"  # pushpull 侧消费组（按组水平扩展），env: CHATCHAT_KAFKA_CONSUMER_GROUP
+push_topic = "chatchat-push"  # 在线推送落地 topic（pushpull 生产→gateway per-gateway 广播组消费，W3-M05/ADR-0009），env: CHATCHAT_KAFKA_PUSH_TOPIC
+hot_topic = "chatchat-hot-group"  # 热点群专属 topic（gateway 行快照路由生产→pushpull hot 消费者写 group_timeline，W4-M02/ADR-0010），env: CHATCHAT_KAFKA_HOT_TOPIC
+hot_consumer_group = "chatchat-pushpull-hot"  # hot 消费组（与普通组 rebalance/lag 域分离），env: CHATCHAT_KAFKA_HOT_CONSUMER_GROUP
+
+[jwt]
+# 必须经环境变量 CHATCHAT_JWT_SECRET 注入（非空且 ≥32 字节），此处填写无效。
+secret = ""
+access_ttl_sec = 7200     # 2h，env: CHATCHAT_JWT_ACCESS_TTL_SEC
+refresh_ttl_sec = 604800  # 7d，env: CHATCHAT_JWT_REFRESH_TTL_SEC
+
+[user]
+bcrypt_cost = 10          # 生产默认；测试用 4，env: CHATCHAT_USER_BCRYPT_COST
+verify_code_enabled = false  # 验证码校验开关（ADR-0002），env: CHATCHAT_USER_VERIFY_CODE_ENABLED
+verify_code_mock = "000000"  # 开发期固定码（ADR-0002），env: CHATCHAT_USER_VERIFY_CODE_MOCK
+
+[ws]
+addr = ":8081"            # WS 网关监听地址（与 api :8080 分离），env: CHATCHAT_WS_ADDR
+heartbeat_timeout_sec = 60   # 读空闲超时=心跳超时（spec §8.5），env: CHATCHAT_WS_HEARTBEAT_TIMEOUT_SEC
+write_timeout_sec = 10     # 单次写超时（超时断连），env: CHATCHAT_WS_WRITE_TIMEOUT_SEC
+send_channel_size = 256    # 每连接下行缓冲（满即踢慢消费者），env: CHATCHAT_WS_SEND_CHANNEL_SIZE
+max_message_bytes = 65536  # 单帧上限 64KB，env: CHATCHAT_WS_MAX_MESSAGE_BYTES
+online_ttl_sec = 120       # Redis 在线键 TTL（须大于心跳超时），env: CHATCHAT_WS_ONLINE_TTL_SEC
+gateway_id = ""            # 空则取 os.Hostname()（spec §10 在线键值），env: CHATCHAT_WS_GATEWAY_ID
+
+[deliver]
+driver = "kafka"          # 投递驱动 kafka|memory（kafka=生产形态：Deliverer 写 MQ、重推参数不生效；memory=降级：在线推+重推），W3-M04，env: CHATCHAT_DELIVER_DRIVER
+retry_base_ms = 1000       # （仅 memory 生效）首次重推等待与退避基数 [10,600000]（退避倍数固定 2：1s/2s/4s），env: CHATCHAT_DELIVER_RETRY_BASE_MS
+retry_max = 3              # （仅 memory 生效）重推次数上限 [1,10]（另含首发共最多 1+retry_max 次 Push），env: CHATCHAT_DELIVER_RETRY_MAX
+
+[logic]
+addr = ":8082"             # logic 服务健康端点监听（W2 无业务监听；W3 Kafka 消费参数届时增补），env: CHATCHAT_LOGIC_ADDR
+
+[pushpull]
+addr = ":8083"             # pushpull 服务健康端点监听，env: CHATCHAT_PUSHPULL_ADDR
+hot_notify_workers = 4     # hot 旁路协程池 worker 数 [1,64]（可丢弃旁路：满即丢+计数；Timeline 写入不入池，W4-M02 D5），env: CHATCHAT_PUSHPULL_HOT_NOTIFY_WORKERS
+hot_notify_queue = 1024    # hot 旁路队列容量 [1,65536]（M02 阶段池内无真实业务任务，机制就绪 M03 填入轻通知），env: CHATCHAT_PUSHPULL_HOT_NOTIFY_QUEUE
+
+[group]
+reconcile_interval_sec = 300  # api 进程成员数对账周期（秒）[10,86400]，W3-M01，env: CHATCHAT_GROUP_RECONCILE_INTERVAL_SEC
+
+[friend]
+require_friend_for_chat = true  # 单聊好友关系门槛（默认开：非好友不能互发单聊；false 放开），W3-M02，env: CHATCHAT_FRIEND_REQUIRE_FOR_CHAT
+
+[inbox]
+roam_days = 7              # 漫游窗口天数 [1,365]（会话发现清单过滤：窗口外投递记录不出现在补齐发现面；拉取/历史不受限），W3-M06，env: CHATCHAT_INBOX_ROAM_DAYS
+
+[hotdetect]
+threshold_msg_per_min = 50       # 打标阈值 msg/min [1,100000]（滑动窗口均值 ≥ 阈值判 hot，含等号），W4-M01，env: CHATCHAT_HOTDETECT_THRESHOLD_MSG_PER_MIN
+aggregate_interval_sec = 60      # 聚合周期（秒）[1,3600]，须为 bucket_sec 整数倍（api 进程 Detector 周期 + hot_group_stat 窗口粒度），env: CHATCHAT_HOTDETECT_AGGREGATE_INTERVAL_SEC
+window_min = 60                  # 滑动窗口（分钟）[1,1440]，window*60 须为 bucket_sec 整数倍且窗口桶数 ≤3600，env: CHATCHAT_HOTDETECT_WINDOW_MIN
+bucket_sec = 60                  # 计数桶宽（秒）[1,60]（桶=unixSec/bucket_sec 全局对齐，Redis group:{id}:msg:{bucket}），env: CHATCHAT_HOTDETECT_BUCKET_SEC
+low_periods_to_unmark = 3        # 摘标所需连续低周期数 N [1,100]（streak ≥ N 摘标；遇 ≥阈值周期清零），env: CHATCHAT_HOTDETECT_LOW_PERIODS_TO_UNMARK
+
+[signal]
+addr = "127.0.0.1:8084"     # gRPC Exchange 信令契约面监听（强制 loopback：127.0.0.1/localhost/[::1]，形态 C 前不对外，W4-M04/ADR-0011），env: CHATCHAT_SIGNAL_ADDR
+session_ttl_sec = 60        # 未应答信令会话 TTL（秒）[10,3600]（sweep 周期 = min(ttl,10s) 兜底回收；活跃通话由 hangup 拆除），env: CHATCHAT_SIGNAL_SESSION_TTL_SEC
+

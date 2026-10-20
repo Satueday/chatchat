@@ -1,0 +1,93 @@
+# ChatChat 基础设施编排（W1-M04）：MySQL 8.0 / Redis 7 / Kafka 3.9.0（KRaft 单节点）。
+# 端口与凭据对齐 config.toml 默认值（单一来源对齐表见 README「基础设施」章节）。
+# 敏感项一律经 .env 注入（cp .env.example .env），本文件无明文密码、无硬编码 IP。
+# 不使用 version:/links（Compose v2 已废弃）。
+# 镜像 tag 策略：MySQL/Redis 系列锚定（防 latest 漂移）；Kafka 精确锚定（KRaft env 配置对版本敏感）。
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: chatchat-mysql
+    environment:
+      # 必填：缺失或空值时 compose up 直接报错（失败立即暴露，不静默降级）
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required - cp .env.example .env and set it}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-chatchat}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - chatchat-mysql-data:/var/lib/mysql
+      # initdb 下的 SQL 仅在数据卷为空的首次初始化时执行；改 SQL 后需 make compose-reset。
+      # W1-M05（D1）：根 chatchat.sql 单文件挂载为唯一执行入口（零副本零漂移）。
+      # ./initdb 目录挂载暂不并存：目录挂载 :ro 时单文件无法创建挂载点；去掉 :ro 则
+      # Docker 会在宿主 initdb/ 下生成空挂载点文件污染仓库（Windows 实测）。
+      # W2+ 增量脚本落地时再恢复目录挂载并一并处理两种约束。
+      - ../chatchat.sql:/docker-entrypoint-initdb.d/10-chatchat.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  redis:
+    image: redis:7
+    container_name: chatchat-redis
+    # 无密码（对齐 config.toml redis.password 默认空）；AOF 持久化经 .env 可配，默认 no
+    command: ["redis-server", "--appendonly", "${REDIS_APPENDONLY:-no}"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - chatchat-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: chatchat-kafka
+    environment:
+      # KRaft 单节点；apache/kafka 镜像将 KAFKA_* env 自动转换为 server.properties 属性
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # W4-M05（plan D3，ADR-0012）双 listener：INTERNAL kafka:29092 供服务容器
+      # 寻址（广播地址可解析）；EXTERNAL localhost:9092 保留宿主开发形态
+      # （make run/集成测试照旧）。既有两条容器内 localhost:9092 路径（本
+      # healthcheck、make topics docker exec）继续命中 EXTERNAL listener；
+      # 宿主端口映射 ${KAFKA_PORT:-9092}:9092 不变。卷/网络/CLUSTER_ID 不动。
+      # listener 地址用空 host 形式（:29092）——apache/kafka 镜像对 0.0.0.0
+      # 字面会派生不可路由的 controller advertised 地址而拒绝启动（实测）。
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # 固定 CLUSTER_ID（22 字符 base64）+ 数据卷 → down/up 重复拉起幂等（重复 format 报错已由此消除）
+      CLUSTER_ID: Y2hhdGNoYXQtaW5mcmEwMQ
+      # 镜像默认 log.dirs=/tmp/kraft-combined-logs（容器内临时目录），显式指向 named 卷持久化 KRaft 元数据
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    volumes:
+      - chatchat-kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  chatchat-mysql-data:
+  chatchat-redis-data:
+  chatchat-kafka-data:

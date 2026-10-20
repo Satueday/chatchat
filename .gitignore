@@ -1,0 +1,26 @@
+# 敏感环境变量（模板 .env.example W1-M04 提交，本体不入库）
+.env
+
+# 本地配置（仓库只提交 config.toml.example，W1-M02 创建）
+config.toml
+
+# 构建产物
+bin/
+
+# 测试与覆盖率产物
+*.out
+*.test
+coverage.*
+
+# 运行日志
+logs/
+*.log
+
+# IDE
+.idea/
+
+# Windows 可执行产物
+*.exe
+
+# 第二期项目指导文档（私有，不入库；公开面只登记特性与设计于 spec.md）
+plan_02.md

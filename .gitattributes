@@ -1,0 +1,10 @@
+# Windows 检出行为锁定：Makefile/Go/配置文件必须保持 LF，
+# 否则 CRLF 会使 make 报 "missing separator"、gofmt/go build 行为漂移。
+* text=auto
+Makefile text eol=lf
+*.mk text eol=lf
+*.go text eol=lf
+*.toml text eol=lf
+*.sql text eol=lf
+*.sh text eol=lf
+*.md text

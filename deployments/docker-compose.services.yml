@@ -1,0 +1,236 @@
+# ChatChat 服务编排 overlay（W4-M05 plan D2，ADR-0012）：叠加基础设施 compose
+# 使用——docker compose -f deployments/docker-compose.yml -f deployments/docker-compose.services.yml
+# （make full-* 封装）。dev 流程（make compose-up/run）不受本文件影响（D12
+# 双形态并存：宿主端口 8080-8083 两形态共用，W3 验收资产零改动）。
+#
+# 拓扑：mysql/redis/kafka（healthy 门控）→ topics-init（一次性建题，6 分区，
+# completed_successfully 门控——先于一切生产者，规避自动建题 1 分区退化，
+# ADR-0007 §8.1）→ api/gateway/logic/pushpull（restart: unless-stopped；
+# readyz/healthz healthcheck——「通过健康检查」=依赖就绪门槛语义）。
+#
+# env 注入全部走既有 CHATCHAT_* envKeys（零 config 代码改动，plan D2）；
+# 敏感项（MYSQL_ROOT_PASSWORD/CHATCHAT_JWT_SECRET）经 .env 透传，compose
+# 缺失即报错（fail-fast，不静默降级）——JWT secret 不由 full-up 自动生成
+# （部署密钥应显式，.env.example 给生成命令示例）。
+#
+# 信号 ：8084 loopback 不发布（config validate 强制，plan 禁止事项）。
+
+services:
+  # ---- 三依赖资源限制档（overlay 补丁形态：dev 流程不带 limits；保守值，
+  # 压测级校准归 M07——plan D2/移交 14 对齐登记，ADR-0012）----
+  mysql:
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+  redis:
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+  kafka:
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  # ---- topics-init：一次性建题（plan D4）——幂等（--if-not-exists），
+  # 分区数不足场景归 make topics 运维口径（登记）。----
+  topics-init:
+    image: apache/kafka:3.9.0
+    container_name: chatchat-topics-init
+    entrypoint:
+      - sh
+      - -ec
+      - |
+        echo "topics-init: waiting for kafka:29092 ..."
+        i=0
+        until /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server kafka:29092 >/dev/null 2>&1; do
+          i=$$((i+1))
+          if [ $$i -ge 60 ]; then echo "topics-init: kafka unreachable after 60 tries" >&2; exit 1; fi
+          sleep 2
+        done
+        for t in chatchat-message chatchat-push chatchat-hot-group; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists --topic $$t --partitions ${KAFKA_PARTITIONS:-6} --replication-factor 1
+        done
+        for t in chatchat-message chatchat-push chatchat-hot-group; do
+          pc=$$(/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --describe --topic $$t | sed -n 's/.*PartitionCount: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+          echo "topics-init: $$t PartitionCount=$$pc"
+          if [ -z "$$pc" ] || [ "$$pc" -lt ${KAFKA_PARTITIONS:-6} ]; then
+            echo "topics-init: FAIL $$t PartitionCount=$$pc < ${KAFKA_PARTITIONS:-6}" >&2
+            exit 1
+          fi
+        done
+        echo "topics-init: all topics ready"
+    depends_on:
+      kafka:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: "no"
+
+  # ---- 四服务（镜像 chatchat:0.1.0 本地构建，make full-build）----
+  api:
+    image: chatchat:0.1.0
+    container_name: chatchat-api
+    entrypoint: ["/app/api"]
+    environment: &api-env
+      CHATCHAT_MYSQL_HOST: mysql
+      CHATCHAT_MYSQL_PORT: "3306"
+      CHATCHAT_MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:?MYSQL_ROOT_PASSWORD is required - set it in .env}
+      CHATCHAT_REDIS_ADDR: redis:6379
+      CHATCHAT_KAFKA_BROKERS: kafka:29092
+      CHATCHAT_JWT_SECRET: ${CHATCHAT_JWT_SECRET:?CHATCHAT_JWT_SECRET is required - generate one per .env.example and set it in .env}
+      # 热点参数透传（W4-M07 plan D2/D6）：五键 + 对账周期经宿主 env 或 .env
+      # 注入；缺省 ${VAR:-} 为空串——config.Load 的 viper BindEnv 对空值视为
+      # 未设置（allowEmptyEnv=false），回落内置默认档，零注入零行为变化。
+      # 锚点共享至四服务：api Detector（聚合/打标）与 gateway Recorder
+      #（计数桶）同源 cfg.HotDetect，参数必须一致（桶键对齐）。
+      CHATCHAT_HOTDETECT_THRESHOLD_MSG_PER_MIN: ${CHATCHAT_HOTDETECT_THRESHOLD_MSG_PER_MIN:-}
+      CHATCHAT_HOTDETECT_AGGREGATE_INTERVAL_SEC: ${CHATCHAT_HOTDETECT_AGGREGATE_INTERVAL_SEC:-}
+      CHATCHAT_HOTDETECT_WINDOW_MIN: ${CHATCHAT_HOTDETECT_WINDOW_MIN:-}
+      CHATCHAT_HOTDETECT_BUCKET_SEC: ${CHATCHAT_HOTDETECT_BUCKET_SEC:-}
+      CHATCHAT_HOTDETECT_LOW_PERIODS_TO_UNMARK: ${CHATCHAT_HOTDETECT_LOW_PERIODS_TO_UNMARK:-}
+      CHATCHAT_GROUP_RECONCILE_INTERVAL_SEC: ${CHATCHAT_GROUP_RECONCILE_INTERVAL_SEC:-}
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      topics-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 192m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    stop_grace_period: 15s
+
+  gateway:
+    image: chatchat:0.1.0
+    container_name: chatchat-gateway
+    entrypoint: ["/app/gateway"]
+    environment:
+      <<: *api-env
+      # 稳定 gateway_id（plan D2：容器重建防 push 消费组爆炸 + OffsetOldest
+      # 全量重扫；多实例时 -2/-3 递增）。pushpull 的 lag watch 同读此值。
+      CHATCHAT_WS_GATEWAY_ID: chatchat-gateway-1
+    ports:
+      - "8081:8081"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      topics-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8081/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    stop_grace_period: 15s
+
+  logic:
+    image: chatchat:0.1.0
+    container_name: chatchat-logic
+    entrypoint: ["/app/logic"]
+    environment:
+      <<: *api-env
+    ports:
+      - "8082:8082"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      # logic 无依赖面不设 readyz（plan D8）——healthz 即存活探针。
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8082/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    stop_grace_period: 15s
+
+  pushpull:
+    image: chatchat:0.1.0
+    container_name: chatchat-pushpull
+    entrypoint: ["/app/pushpull"]
+    environment:
+      <<: *api-env
+      # lag watch 的 push 消费组名（chatchat-gw-{gateway_id}）与 gateway 同源。
+      CHATCHAT_WS_GATEWAY_ID: chatchat-gateway-1
+    ports:
+      - "8083:8083"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      topics-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8083/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    stop_grace_period: 15s

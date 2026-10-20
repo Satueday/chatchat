@@ -1,0 +1,56 @@
+syntax = "proto3";
+package protocol;
+option go_package = "pkg/protocol";
+
+// WebSocket 帧外层信封
+message Frame {
+  Header header = 1;      // 帧头（cmd、seq、ack 等）
+  bytes payload = 2;      // 按 cmd 编解码的具体消息体
+}
+
+message Header {
+  int32 cmd = 1;          // 命令字：心跳/单聊/群聊/信令/ACK/拉取请求/拉取响应…
+  int64 seq = 2;          // 客户端发起请求的序号（用于响应匹配）
+  int64 ack = 3;          // 确认的 seq（ACK 回执）
+  string traceId = 4;     // 链路追踪
+}
+
+// 聊天消息
+message ChatMessage {
+  string msgId = 1;        // 服务端生成的全局唯一消息ID
+  string conversationId = 2; // 会话ID（单聊: u1|u2 排序拼接；群聊: g_{groupId}）
+  string from = 3;         // 发送者 userId
+  string to = 4;           // 接收者 userId 或 groupId
+  int64  msgSeq = 5;       // 会话内递增序号（拉取/去重/排序核心）
+  int64  timestamp = 6;    // 服务端时间戳
+  int32  contentType = 7;  // 1文本 2文件 3图片 4音频 5视频 6语音通话 7视频通话 8自定义
+  string content = 8;      // 文本内容 / JSON 扩展
+  string url = 9;          // 媒体资源地址
+  map<string, string> ext = 10; // 扩展字段（AI消息标记等）
+}
+
+// 拉取请求（客户端携带本地最大 seq）
+message PullRequest {
+  string conversationId = 1;
+  int64  afterSeq = 2;     // 本地已同步到的 seq
+  int32  limit = 3;        // 单次拉取上限（默认 50）
+}
+
+// 拉取响应
+message PullResponse {
+  string conversationId = 1;
+  repeated ChatMessage messages = 2;
+  int64  maxSeq = 3;       // 服务端当前最大 seq，判断是否拉全
+  bool   hasMore = 4;
+}
+
+// WebRTC 信令
+message Signal {
+  string callId = 1;       // 一次通话会话ID
+  string from = 2;
+  string to = 3;
+  int32  signalType = 4;   // 1 offer 2 answer 3 ice-candidate 4 挂断 5 呼叫邀请
+  string sdp = 5;          // SDP 内容
+  string candidate = 6;    // ICE candidate JSON
+  bool   isGroup = 7;      // 是否群组通话（预留）
+}

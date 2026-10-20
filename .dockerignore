@@ -1,0 +1,17 @@
+# 构建上下文裁剪（W4-M05 plan §6 文件清单，D1）：镜像只须 go.mod/go.sum/
+# cmd/config/internal/pkg/web。排除秘密（.env）、本地产物（bin/logs）、
+# 工具与文档，缩小上下文并防泄漏。
+.git
+.gitignore
+.env
+.env.example
+bin/
+logs/
+test/
+docs/
+deployments/
+scripts/
+.zcode/
+*.md
+W*-plan.md
+coverage.out
